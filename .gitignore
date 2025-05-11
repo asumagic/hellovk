@@ -1,0 +1,3 @@
+/target
+workdir/shaders/
+Cargo.lock
