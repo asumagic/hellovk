@@ -27,17 +27,21 @@ fn main() -> Result<()> {
     event_loop.run(move |event, elwt| match event {
         Event::AboutToWait => window.request_redraw(),
         Event::WindowEvent { event, .. } => match event {
-            WindowEvent::RedrawRequested if !elwt.exiting() => {
+            WindowEvent::RedrawRequested if !elwt.exiting() && !app.minimized => {
                 unsafe { app.render(&window) }.unwrap()
             }
             WindowEvent::CloseRequested => {
                 elwt.exit();
             }
             WindowEvent::Resized(new_size) => {
-                if new_size != old_size {
-                    app.resized = true;
-                    old_size = new_size;
+                if new_size.width == 0 || new_size.height == 0 {
+                    app.minimized = true;    
                 }
+                else if new_size != old_size {
+                    app.resized = true;
+                    app.minimized = false;
+                }
+                old_size = new_size;
             }
             _ => {}
         },

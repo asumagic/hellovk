@@ -259,7 +259,8 @@ pub struct App {
     data: AppData,
     device: Device,
     frame_in_flight_idx: usize,
-    pub(crate) resized: bool,
+    pub resized: bool,
+    pub minimized: bool,
 }
 
 impl App {
@@ -303,6 +304,7 @@ impl App {
                 device,
                 frame_in_flight_idx: 0,
                 resized: false,
+                minimized: false,
             })
         }
     }
