@@ -5,7 +5,7 @@ use std::path::Path;
 use vulkanalia::bytecode::Bytecode;
 use vulkanalia::vk::{DeviceV1_0, HasBuilder};
 use vulkanalia::{Device, vk};
-use vulkanalia_sys::{Extent2D, Handle, RenderPass, ShaderModule};
+use vulkanalia_sys::{Extent2D, Handle, ShaderModule};
 
 #[derive(Clone, Debug, Default)]
 pub struct AppShader {
@@ -51,7 +51,7 @@ impl AppPipeline {
     pub unsafe fn new(
         device: &Device,
         viewport_extent: &Extent2D,
-        render_pass: RenderPass,
+        swapchain_format: vk::Format,
     ) -> Result<Self> {
         trace!("Compiling app pipeline");
         let mut vert = AppShader::from_path(device, "shaders/vert.spv")?;
@@ -123,6 +123,10 @@ impl AppPipeline {
         let layout_info = vk::PipelineLayoutCreateInfo::builder();
         let pipeline_layout = unsafe { device.create_pipeline_layout(&layout_info, None)? };
 
+        let swapchain_formats = [swapchain_format];
+        let mut pipeline_rendering_info = vk::PipelineRenderingCreateInfo::builder()
+            .color_attachment_formats(&swapchain_formats);
+
         let stages = &[vert_stage, frag_stage];
         let info = vk::GraphicsPipelineCreateInfo::builder()
             .stages(stages)
@@ -133,10 +137,10 @@ impl AppPipeline {
             .multisample_state(&multisample_state)
             .color_blend_state(&color_blend_state)
             .layout(pipeline_layout)
-            .render_pass(render_pass)
             .subpass(0)
             .base_pipeline_handle(vk::Pipeline::null())
-            .base_pipeline_index(-1);
+            .base_pipeline_index(-1)
+            .push_next(&mut pipeline_rendering_info);
 
         let pipeline = unsafe {
             device

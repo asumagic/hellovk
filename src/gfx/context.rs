@@ -15,8 +15,8 @@ use std::ffi::c_char;
 use thiserror::Error;
 use vulkanalia::loader::LibloadingLoader;
 use vulkanalia::vk::{
-    DeviceV1_0, EntryV1_0, ExtDebugUtilsExtension, HasBuilder, InstanceV1_0, KhrSurfaceExtension,
-    KhrSwapchainExtension,
+    DeviceV1_0, DeviceV1_3, EntryV1_0, ExtDebugUtilsExtension, HasBuilder, InstanceV1_0,
+    KhrSurfaceExtension, KhrSwapchainExtension,
 };
 use vulkanalia::{Device, Entry, Instance, vk, window as vk_window};
 use vulkanalia_sys::{Handle, InstanceCreateFlags};
@@ -93,7 +93,7 @@ pub unsafe fn create_instance(
             .application_version(vulkanalia_sys::make_version(0, 1, 0))
             .engine_name(b"nya\0")
             .engine_version(vulkanalia_sys::make_version(0, 1, 0))
-            .api_version(vulkanalia_sys::make_version(1, 0, 0));
+            .api_version(vulkanalia_sys::make_version(1, 3, 0));
 
         let config = create_instance_info(window, entry)?;
 
@@ -147,7 +147,10 @@ unsafe fn check_physical_device(
     }
 }
 
-const REQUIRED_DEVICE_EXTENSIONS: &[vk::ExtensionName] = &[vk::KHR_SWAPCHAIN_EXTENSION.name];
+const REQUIRED_DEVICE_EXTENSIONS: &[vk::ExtensionName] = &[
+    vk::KHR_SWAPCHAIN_EXTENSION.name,
+    vk::KHR_DYNAMIC_RENDERING_EXTENSION.name,
+];
 
 unsafe fn check_physical_device_extensions(
     instance: &Instance,
@@ -234,11 +237,15 @@ unsafe fn create_logical_device(
 
         let features = vk::PhysicalDeviceFeatures::builder();
 
+        let mut feature_dynamic_rendering =
+            vk::PhysicalDeviceDynamicRenderingFeatures::builder().dynamic_rendering(true);
+
         let info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(&queue_infos)
             .enabled_layer_names(&layers)
             .enabled_extension_names(&extensions)
-            .enabled_features(&features);
+            .enabled_features(&features)
+            .push_next(&mut feature_dynamic_rendering);
 
         let device = instance.create_device(data.physical_device, &info, None)?;
 
@@ -285,11 +292,8 @@ impl App {
 
             create_swapchain_image_views(&device, &mut data)?;
 
-            create_render_pass(&instance, &device, &mut data)?;
             data.render_pipeline =
-                AppPipeline::new(&device, &data.swapchain_extent, data.main_render_pass)?;
-
-            create_framebuffers(&device, &mut data)?;
+                AppPipeline::new(&device, &data.swapchain_extent, data.swapchain_format)?;
 
             create_command_pool(&instance, &device, &mut data)?;
             create_command_buffers(&device, &mut data)?;
@@ -325,13 +329,11 @@ impl App {
                 self.data.swapchain_extent
             );
             create_swapchain_image_views(&self.device, &mut self.data)?;
-            create_render_pass(&self.instance, &self.device, &mut self.data)?;
             self.data.render_pipeline = AppPipeline::new(
                 &self.device,
                 &self.data.swapchain_extent,
-                self.data.main_render_pass,
+                self.data.swapchain_format,
             )?;
-            create_framebuffers(&self.device, &mut self.data)?;
             create_command_buffers(&self.device, &mut self.data)?;
             self.data
                 .in_flight_swapchain_image_fences
@@ -340,8 +342,8 @@ impl App {
         }
     }
 
-    /// Destroy the swapchain, render passes and rendering pipelines, which attach to the
-    /// framebuffers.
+    /// Destroy the swapchain, and rendering pipelines, which attach directly to swapchain-related
+    /// objects.
     ///
     /// # Safety
     ///
@@ -352,18 +354,10 @@ impl App {
     /// (e.g. command buffers that bind swapchain resources).
     unsafe fn destroy_swapchain_and_pipeline(&mut self) {
         unsafe {
-            self.data
-                .framebuffers
-                .iter()
-                .for_each(|f| self.device.destroy_framebuffer(*f, None));
-
             self.device
                 .free_command_buffers(self.data.command_pool, &self.data.command_buffers);
 
             self.data.render_pipeline.destroy(&self.device);
-
-            self.device
-                .destroy_render_pass(self.data.main_render_pass, None);
 
             self.data
                 .swapchain_image_views
@@ -454,71 +448,6 @@ impl App {
     }
 }
 
-unsafe fn create_render_pass(
-    _instance: &Instance,
-    device: &Device,
-    data: &mut AppData,
-) -> Result<()> {
-    let color_attachment = vk::AttachmentDescription::builder()
-        .format(data.swapchain_format)
-        .samples(vk::SampleCountFlags::_1)
-        .load_op(vk::AttachmentLoadOp::CLEAR)
-        .store_op(vk::AttachmentStoreOp::STORE)
-        .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-        .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-        .initial_layout(vk::ImageLayout::UNDEFINED)
-        .final_layout(vk::ImageLayout::PRESENT_SRC_KHR);
-
-    let color_attachment_ref = vk::AttachmentReference::builder()
-        .attachment(0)
-        .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
-
-    let color_attachments = &[color_attachment_ref];
-    let subpass = vk::SubpassDescription::builder()
-        .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-        .color_attachments(color_attachments);
-
-    let dependency = vk::SubpassDependency::builder()
-        .src_subpass(vk::SUBPASS_EXTERNAL)
-        .dst_subpass(0)
-        .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .src_access_mask(vk::AccessFlags::empty())
-        .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-        .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
-
-    let attachments = &[color_attachment];
-    let subpasses = &[subpass];
-    let dependencies = &[dependency];
-    let info = vk::RenderPassCreateInfo::builder()
-        .attachments(attachments)
-        .subpasses(subpasses)
-        .dependencies(dependencies);
-
-    data.main_render_pass = unsafe { device.create_render_pass(&info, None)? };
-
-    Ok(())
-}
-
-unsafe fn create_framebuffers(device: &Device, data: &mut AppData) -> Result<()> {
-    data.framebuffers = data
-        .swapchain_image_views
-        .iter()
-        .map(|i| {
-            let attachments = &[*i];
-            let create_info = vk::FramebufferCreateInfo::builder()
-                .render_pass(data.main_render_pass)
-                .attachments(attachments)
-                .width(data.swapchain_extent.width)
-                .height(data.swapchain_extent.height)
-                .layers(1);
-
-            unsafe { device.create_framebuffer(&create_info, None) }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    Ok(())
-}
-
 unsafe fn create_command_pool(
     instance: &Instance,
     device: &Device,
@@ -542,7 +471,7 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
         let allocate_info = vk::CommandBufferAllocateInfo::builder()
             .command_pool(data.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(data.framebuffers.len() as u32);
+            .command_buffer_count(data.swapchain_image_views.len() as u32);
 
         data.command_buffers = device.allocate_command_buffers(&allocate_info)?;
 
@@ -559,27 +488,97 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
                 .offset(vk::Offset2D::default())
                 .extent(data.swapchain_extent);
 
-            let color_clear_value = vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
-                },
-            };
+            let color_attachment = vk::RenderingAttachmentInfo::builder()
+                .image_view(data.swapchain_image_views[i])
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .resolve_mode(vk::ResolveModeFlags::NONE)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 1.0],
+                    },
+                });
 
-            let clear_values = &[color_clear_value];
-            let info = vk::RenderPassBeginInfo::builder()
-                .render_pass(data.main_render_pass)
-                .framebuffer(data.framebuffers[i])
+            let color_attachments = &[color_attachment];
+
+            let render_info = vk::RenderingInfo::builder()
                 .render_area(render_area)
-                .clear_values(clear_values);
+                .layer_count(1)
+                .color_attachments(color_attachments);
 
-            device.cmd_begin_render_pass(*cmd, &info, vk::SubpassContents::INLINE);
+            // Perform image transition from whatever layout it had for presentation back to
+            // something suitable for rendering
+            {
+                let image_barrier_subresource_range = vk::ImageSubresourceRange::builder()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1);
+
+                let image_memory_barrier = vk::ImageMemoryBarrier::builder()
+                    .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .image(data.swapchain_images[i])
+                    .subresource_range(image_barrier_subresource_range);
+
+                let memory_barriers: [vk::MemoryBarrier; 0] = [];
+                let buffer_memory_barriers: [vk::BufferMemoryBarrier; 0] = [];
+                let image_memory_barriers = [image_memory_barrier];
+
+                device.cmd_pipeline_barrier(
+                    *cmd,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::DependencyFlags::default(),
+                    &memory_barriers,
+                    &buffer_memory_barriers,
+                    &image_memory_barriers,
+                );
+            }
+
+            device.cmd_begin_rendering(*cmd, &render_info);
             device.cmd_bind_pipeline(
                 *cmd,
                 vk::PipelineBindPoint::GRAPHICS,
                 data.render_pipeline.pipeline,
             );
             device.cmd_draw(*cmd, 3, 1, 0, 0);
-            device.cmd_end_render_pass(*cmd);
+            device.cmd_end_rendering(*cmd);
+
+            // Perform ->swapchain image transition
+            {
+                let image_barrier_subresource_range = vk::ImageSubresourceRange::builder()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_mip_level(0)
+                    .level_count(1)
+                    .base_array_layer(0)
+                    .layer_count(1);
+
+                let image_memory_barrier = vk::ImageMemoryBarrier::builder()
+                    .src_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
+                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                    .image(data.swapchain_images[i])
+                    .subresource_range(image_barrier_subresource_range);
+
+                let memory_barriers: [vk::MemoryBarrier; 0] = [];
+                let buffer_memory_barriers: [vk::BufferMemoryBarrier; 0] = [];
+                let image_memory_barriers = [image_memory_barrier];
+
+                device.cmd_pipeline_barrier(
+                    *cmd,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    vk::DependencyFlags::default(),
+                    &memory_barriers,
+                    &buffer_memory_barriers,
+                    &image_memory_barriers,
+                );
+            }
+
             device.end_command_buffer(*cmd)?;
         }
 
@@ -666,9 +665,6 @@ pub struct AppData {
     pub swapchain_extent: vk::Extent2D,
     pub swapchain_image_views: Vec<vk::ImageView>,
 
-    pub framebuffers: Vec<vk::Framebuffer>,
-
-    pub main_render_pass: vk::RenderPass,
     pub render_pipeline: AppPipeline,
 
     pub command_pool: vk::CommandPool,
