@@ -30,10 +30,7 @@ pub struct AppExtensionConfig {
 
 const MAX_FRAMES_IN_FLIGHT: usize = 2;
 
-unsafe fn create_instance_info(
-    window: &Window,
-    entry: &Entry,
-) -> anyhow::Result<AppExtensionConfig> {
+unsafe fn create_instance_info(window: &Window, entry: &Entry) -> Result<AppExtensionConfig> {
     let mut extensions = vk_window::get_required_instance_extensions(window)
         .iter()
         .map(|e| e.as_ptr())
@@ -89,7 +86,7 @@ pub unsafe fn create_instance(
     window: &Window,
     entry: &Entry,
     data: &mut AppData,
-) -> anyhow::Result<Instance> {
+) -> Result<Instance> {
     unsafe {
         let application_info = vulkanalia_sys::ApplicationInfo::builder()
             .application_name(b"gfx :3\0")
@@ -141,7 +138,7 @@ unsafe fn check_physical_device(
 
         check_physical_device_extensions(instance, physical_device)?;
 
-        let swapchain_support = SwapchainSupport::get(&instance, &data, physical_device)?;
+        let swapchain_support = SwapchainSupport::get(instance, data, physical_device)?;
         if swapchain_support.formats.is_empty() || swapchain_support.present_modes.is_empty() {
             Err(anyhow!(SuitabilityError("No swapchain support found.")))
         } else {
@@ -254,6 +251,7 @@ unsafe fn create_logical_device(
 
 #[derive(Clone, Debug)]
 pub struct App {
+    #[allow(dead_code)]
     entry: Entry,
     instance: Instance,
     data: AppData,
@@ -264,7 +262,7 @@ pub struct App {
 }
 
 impl App {
-    pub unsafe fn create(window: &Window) -> anyhow::Result<Self> {
+    pub unsafe fn create(window: &Window) -> Result<Self> {
         unsafe {
             let loader = LibloadingLoader::new(vulkanalia::loader::LIBRARY)?;
             let entry = Entry::new(loader).map_err(|b| anyhow!("{}", b))?;
@@ -277,7 +275,7 @@ impl App {
             pick_physical_device(&instance, &mut data)?;
             let device = create_logical_device(&entry, &instance, &mut data)?;
 
-            create_swapchain(&window, &instance, &device, &mut data)?;
+            create_swapchain(window, &instance, &device, &mut data)?;
             info!(
                 "Swapchain acquired ({} images, {:?}, {:?})",
                 data.swapchain_images.len(),
@@ -359,14 +357,13 @@ impl App {
                 .iter()
                 .for_each(|f| self.device.destroy_framebuffer(*f, None));
 
-            self.device.free_command_buffers(
-                self.data.command_pool,
-                &self.data.command_buffers
-            );
+            self.device
+                .free_command_buffers(self.data.command_pool, &self.data.command_buffers);
 
             self.data.render_pipeline.destroy(&self.device);
 
-            self.device.destroy_render_pass(self.data.main_render_pass, None);
+            self.device
+                .destroy_render_pass(self.data.main_render_pass, None);
 
             self.data
                 .swapchain_image_views
@@ -378,83 +375,87 @@ impl App {
     }
 
     pub unsafe fn render(&mut self, window: &Window) -> Result<()> {
-        if !self.data.in_flight_swapchain_image_fences[self.frame_in_flight_idx as usize].is_null()
-        {
+        unsafe {
+            if !self.data.in_flight_swapchain_image_fences[self.frame_in_flight_idx].is_null() {
+                self.device.wait_for_fences(
+                    &[self.data.in_flight_swapchain_image_fences[self.frame_in_flight_idx]],
+                    true,
+                    u64::MAX,
+                )?;
+            }
+
             self.device.wait_for_fences(
-                &[self.data.in_flight_swapchain_image_fences[self.frame_in_flight_idx as usize]],
+                &[self.data.in_flight_fences[self.frame_in_flight_idx]],
                 true,
                 u64::MAX,
             )?;
-        }
 
-        self.device.wait_for_fences(
-            &[self.data.in_flight_fences[self.frame_in_flight_idx]],
-            true,
-            u64::MAX,
-        )?;
-
-        let image_acquisition_result = self
-            .device
-            .acquire_next_image_khr(
+            let image_acquisition_result = self.device.acquire_next_image_khr(
                 self.data.swapchain,
                 u64::MAX,
                 self.data.image_available_semaphores[self.frame_in_flight_idx],
                 vk::Fence::null(),
             );
 
-        let image_index = match image_acquisition_result {
-            Ok((image_index, _)) => image_index as usize,
-            Err(vk::ErrorCode::OUT_OF_DATE_KHR) => return self.recreate_swapchain(window),
-            Err(e) => return Err(anyhow!(e))
-        };
+            let image_index = match image_acquisition_result {
+                Ok((image_index, _)) => image_index as usize,
+                Err(vk::ErrorCode::OUT_OF_DATE_KHR) => return self.recreate_swapchain(window),
+                Err(e) => return Err(anyhow!(e)),
+            };
 
-        self.data.in_flight_swapchain_image_fences[image_index] =
-            self.data.in_flight_fences[self.frame_in_flight_idx];
+            self.data.in_flight_swapchain_image_fences[image_index] =
+                self.data.in_flight_fences[self.frame_in_flight_idx];
 
-        let wait_semaphores = &[self.data.image_available_semaphores[self.frame_in_flight_idx]];
-        let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let command_buffers = &[self.data.command_buffers[image_index as usize]];
-        let signal_semaphores = &[self.data.render_finished_semaphores[self.frame_in_flight_idx]];
-        let submit_info = vk::SubmitInfo::builder()
-            .wait_semaphores(wait_semaphores)
-            .wait_dst_stage_mask(wait_stages)
-            .command_buffers(command_buffers)
-            .signal_semaphores(signal_semaphores);
+            let wait_semaphores = &[self.data.image_available_semaphores[self.frame_in_flight_idx]];
+            let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+            let command_buffers = &[self.data.command_buffers[image_index]];
+            let signal_semaphores =
+                &[self.data.render_finished_semaphores[self.frame_in_flight_idx]];
+            let submit_info = vk::SubmitInfo::builder()
+                .wait_semaphores(wait_semaphores)
+                .wait_dst_stage_mask(wait_stages)
+                .command_buffers(command_buffers)
+                .signal_semaphores(signal_semaphores);
 
-        self.device
-            .reset_fences(&[self.data.in_flight_fences[self.frame_in_flight_idx]])?;
+            self.device
+                .reset_fences(&[self.data.in_flight_fences[self.frame_in_flight_idx]])?;
 
-        self.device.queue_submit(
-            self.data.graphics_queue,
-            &[submit_info],
-            self.data.in_flight_fences[self.frame_in_flight_idx],
-        )?;
+            self.device.queue_submit(
+                self.data.graphics_queue,
+                &[submit_info],
+                self.data.in_flight_fences[self.frame_in_flight_idx],
+            )?;
 
-        let swapchains = &[self.data.swapchain];
-        let image_indices = &[image_index as u32];
-        let present_info = vk::PresentInfoKHR::builder()
-            .wait_semaphores(signal_semaphores)
-            .swapchains(swapchains)
-            .image_indices(image_indices);
+            let swapchains = &[self.data.swapchain];
+            let image_indices = &[image_index as u32];
+            let present_info = vk::PresentInfoKHR::builder()
+                .wait_semaphores(signal_semaphores)
+                .swapchains(swapchains)
+                .image_indices(image_indices);
 
-        let queue_present_result = self.device
-            .queue_present_khr(self.data.present_queue, &present_info);
+            let queue_present_result = self
+                .device
+                .queue_present_khr(self.data.present_queue, &present_info);
 
-        let changed = matches!(queue_present_result, Ok(vk::SuccessCode::SUBOPTIMAL_KHR) | Err(vk::ErrorCode::OUT_OF_DATE_KHR));
-        if changed || self.resized {
-            self.resized = false;
-            self.recreate_swapchain(window)?;
+            let changed = matches!(
+                queue_present_result,
+                Ok(vk::SuccessCode::SUBOPTIMAL_KHR) | Err(vk::ErrorCode::OUT_OF_DATE_KHR)
+            );
+            if changed || self.resized {
+                self.resized = false;
+                self.recreate_swapchain(window)?;
+            }
+            let _queue_present_result = queue_present_result?;
+
+            self.frame_in_flight_idx = (self.frame_in_flight_idx + 1) % MAX_FRAMES_IN_FLIGHT;
+
+            Ok(())
         }
-        let _queue_present_result = queue_present_result?;
-
-        self.frame_in_flight_idx = (self.frame_in_flight_idx + 1) % MAX_FRAMES_IN_FLIGHT;
-
-        Ok(())
     }
 }
 
 unsafe fn create_render_pass(
-    instance: &Instance,
+    _instance: &Instance,
     device: &Device,
     data: &mut AppData,
 ) -> Result<()> {
@@ -523,76 +524,82 @@ unsafe fn create_command_pool(
     device: &Device,
     data: &mut AppData,
 ) -> Result<()> {
-    let indices = QueueFamilyIndices::get(instance, data.surface, data.physical_device)?;
+    unsafe {
+        let indices = QueueFamilyIndices::get(instance, data.surface, data.physical_device)?;
 
-    let info = vk::CommandPoolCreateInfo::builder()
-        .flags(vk::CommandPoolCreateFlags::empty()) // Optional.
-        .queue_family_index(indices.graphics);
+        let info = vk::CommandPoolCreateInfo::builder()
+            .flags(vk::CommandPoolCreateFlags::empty()) // Optional.
+            .queue_family_index(indices.graphics);
 
-    data.command_pool = device.create_command_pool(&info, None)?;
+        data.command_pool = device.create_command_pool(&info, None)?;
 
-    Ok(())
+        Ok(())
+    }
 }
 
 unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<()> {
-    let allocate_info = vk::CommandBufferAllocateInfo::builder()
-        .command_pool(data.command_pool)
-        .level(vk::CommandBufferLevel::PRIMARY)
-        .command_buffer_count(data.framebuffers.len() as u32);
+    unsafe {
+        let allocate_info = vk::CommandBufferAllocateInfo::builder()
+            .command_pool(data.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(data.framebuffers.len() as u32);
 
-    data.command_buffers = device.allocate_command_buffers(&allocate_info)?;
+        data.command_buffers = device.allocate_command_buffers(&allocate_info)?;
 
-    for (i, cmd) in data.command_buffers.iter().enumerate() {
-        let inheritance = vk::CommandBufferInheritanceInfo::builder();
+        for (i, cmd) in data.command_buffers.iter().enumerate() {
+            let inheritance = vk::CommandBufferInheritanceInfo::builder();
 
-        let info = vk::CommandBufferBeginInfo::builder()
-            .flags(vk::CommandBufferUsageFlags::empty()) // Optional.
-            .inheritance_info(&inheritance); // Optional.
+            let info = vk::CommandBufferBeginInfo::builder()
+                .flags(vk::CommandBufferUsageFlags::empty()) // Optional.
+                .inheritance_info(&inheritance); // Optional.
 
-        device.begin_command_buffer(*cmd, &info)?;
+            device.begin_command_buffer(*cmd, &info)?;
 
-        let render_area = vk::Rect2D::builder()
-            .offset(vk::Offset2D::default())
-            .extent(data.swapchain_extent);
+            let render_area = vk::Rect2D::builder()
+                .offset(vk::Offset2D::default())
+                .extent(data.swapchain_extent);
 
-        let color_clear_value = vk::ClearValue {
-            color: vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.0, 1.0],
-            },
-        };
+            let color_clear_value = vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                },
+            };
 
-        let clear_values = &[color_clear_value];
-        let info = vk::RenderPassBeginInfo::builder()
-            .render_pass(data.main_render_pass)
-            .framebuffer(data.framebuffers[i])
-            .render_area(render_area)
-            .clear_values(clear_values);
+            let clear_values = &[color_clear_value];
+            let info = vk::RenderPassBeginInfo::builder()
+                .render_pass(data.main_render_pass)
+                .framebuffer(data.framebuffers[i])
+                .render_area(render_area)
+                .clear_values(clear_values);
 
-        device.cmd_begin_render_pass(*cmd, &info, vk::SubpassContents::INLINE);
-        device.cmd_bind_pipeline(
-            *cmd,
-            vk::PipelineBindPoint::GRAPHICS,
-            data.render_pipeline.pipeline,
-        );
-        device.cmd_draw(*cmd, 3, 1, 0, 0);
-        device.cmd_end_render_pass(*cmd);
-        device.end_command_buffer(*cmd)?;
+            device.cmd_begin_render_pass(*cmd, &info, vk::SubpassContents::INLINE);
+            device.cmd_bind_pipeline(
+                *cmd,
+                vk::PipelineBindPoint::GRAPHICS,
+                data.render_pipeline.pipeline,
+            );
+            device.cmd_draw(*cmd, 3, 1, 0, 0);
+            device.cmd_end_render_pass(*cmd);
+            device.end_command_buffer(*cmd)?;
+        }
+
+        Ok(())
     }
-
-    Ok(())
 }
 
 unsafe fn create_sync_objects(device: &Device, data: &mut AppData) -> Result<()> {
     let semaphore_info = vk::SemaphoreCreateInfo::builder();
     let fence_info = vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
 
-    for _ in 0..MAX_FRAMES_IN_FLIGHT {
-        data.image_available_semaphores
-            .push(device.create_semaphore(&semaphore_info, None)?);
-        data.render_finished_semaphores
-            .push(device.create_semaphore(&semaphore_info, None)?);
-        data.in_flight_fences
-            .push(device.create_fence(&fence_info, None)?);
+    unsafe {
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            data.image_available_semaphores
+                .push(device.create_semaphore(&semaphore_info, None)?);
+            data.render_finished_semaphores
+                .push(device.create_semaphore(&semaphore_info, None)?);
+            data.in_flight_fences
+                .push(device.create_fence(&fence_info, None)?);
+        }
     }
 
     data.in_flight_swapchain_image_fences = data

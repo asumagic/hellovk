@@ -1,5 +1,5 @@
-use anyhow::{Result, anyhow};
-use log::{info, trace};
+use anyhow::Result;
+use log::trace;
 use std::fs;
 use std::path::Path;
 use vulkanalia::bytecode::Bytecode;
