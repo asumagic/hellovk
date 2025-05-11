@@ -1,9 +1,9 @@
 use anyhow::Result;
+use gfx::context::App;
 use winit::dpi::LogicalSize;
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::window::WindowBuilder;
-use gfx::context::App;
 
 mod gfx;
 
@@ -23,6 +23,7 @@ fn main() -> Result<()> {
         .build(&event_loop)?;
 
     let mut app = unsafe { App::create(&window)? };
+    let mut old_size = window.inner_size();
     event_loop.run(move |event, elwt| match event {
         Event::AboutToWait => window.request_redraw(),
         Event::WindowEvent { event, .. } => match event {
@@ -32,6 +33,12 @@ fn main() -> Result<()> {
             WindowEvent::CloseRequested => {
                 elwt.exit();
             }
+            WindowEvent::Resized(new_size) => {
+                if new_size != old_size {
+                    app.resized = true;
+                    old_size = new_size;
+                }
+            }
             _ => {}
         },
         _ => {}
@@ -39,4 +46,3 @@ fn main() -> Result<()> {
 
     Ok(())
 }
-
