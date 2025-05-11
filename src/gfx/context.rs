@@ -149,7 +149,6 @@ unsafe fn check_physical_device(
 
 const REQUIRED_DEVICE_EXTENSIONS: &[vk::ExtensionName] = &[
     vk::KHR_SWAPCHAIN_EXTENSION.name,
-    vk::KHR_DYNAMIC_RENDERING_EXTENSION.name,
 ];
 
 unsafe fn check_physical_device_extensions(
