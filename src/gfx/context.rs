@@ -277,7 +277,7 @@ impl App {
 
             create_swapchain(window, &instance, &device, &mut data)?;
             info!(
-                "Swapchain acquired ({} images, {:?}, {:?})",
+                "Initial swapchain acquired ({} images, {:?}, {:?})",
                 data.swapchain_images.len(),
                 data.swapchain_format,
                 data.swapchain_extent
@@ -318,8 +318,8 @@ impl App {
             // and recreating it, e.g. because we can opt to just clear the command buffers
 
             create_swapchain(window, &self.instance, &self.device, &mut self.data)?;
-            info!(
-                "Swapchain acquired ({} images, {:?}, {:?})",
+            debug!(
+                "Swapchain reacquired ({} images, {:?}, {:?})",
                 self.data.swapchain_images.len(),
                 self.data.swapchain_format,
                 self.data.swapchain_extent
