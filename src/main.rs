@@ -8,7 +8,6 @@ use winit::window::WindowBuilder;
 mod gfx;
 
 // TODO ideas for improvements:
-// - dynamic rendering?
 // - refactoring things out of `context`?
 // - figure out some form of RAII abstractions?
 // - document and research the uses of unsafe{} further?
