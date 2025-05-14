@@ -289,7 +289,6 @@ impl ApplicationHandler for App {
         );
         self.old_size = self.window.as_ref().unwrap().inner_size();
 
-        // FIXME: opposite of resumed to teardown state??
         // FIXME: propagate error instead of unwrap
         unsafe {
             self.init().unwrap();
