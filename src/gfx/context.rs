@@ -79,6 +79,11 @@ unsafe fn create_instance_info(window: &Window, entry: &Entry) -> Result<AppExte
         InstanceCreateFlags::empty()
     };
 
+    // dependency of device extension swapchain_maintenance1
+    extensions.push(vulkanalia_sys::EXT_SURFACE_MAINTENANCE1_EXTENSION.name.as_ptr());
+    // dependency of instance extension surface_maintenance1
+    extensions.push(vulkanalia_sys::KHR_GET_SURFACE_CAPABILITIES2_EXTENSION.name.as_ptr());
+
     Ok(AppExtensionConfig {
         extensions,
         flags,
@@ -151,7 +156,10 @@ unsafe fn check_physical_device(
     }
 }
 
-const REQUIRED_DEVICE_EXTENSIONS: &[vk::ExtensionName] = &[vk::KHR_SWAPCHAIN_EXTENSION.name];
+const REQUIRED_DEVICE_EXTENSIONS: &[vk::ExtensionName] = &[
+    vk::KHR_SWAPCHAIN_EXTENSION.name,
+    vk::EXT_SWAPCHAIN_MAINTENANCE1_EXTENSION.name,
+];
 
 unsafe fn check_physical_device_extensions(
     instance: &Instance,
@@ -241,12 +249,17 @@ unsafe fn create_logical_device(
         let mut feature_dynamic_rendering =
             vk::PhysicalDeviceDynamicRenderingFeatures::builder().dynamic_rendering(true);
 
+        let mut feature_swapchain_maintenance1 =
+            vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::builder()
+                .swapchain_maintenance1(true);
+
         let info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(&queue_infos)
             .enabled_layer_names(&layers)
             .enabled_extension_names(&extensions)
             .enabled_features(&features)
-            .push_next(&mut feature_dynamic_rendering);
+            .push_next(&mut feature_dynamic_rendering)
+            .push_next(&mut feature_swapchain_maintenance1);
 
         let device = instance.create_device(data.physical_device, &info, None)?;
 
@@ -262,7 +275,7 @@ pub struct App {
     window: Option<Window>,
     context: Option<AppContext>,
     data: AppData,
-    frame_in_flight_idx: usize,
+    frame_counter: usize,
     pub resized: bool,
     pub minimized: bool,
     old_size: PhysicalSize<u32>,
@@ -328,6 +341,10 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    fn current_in_flight_frame_idx(&self) -> usize {
+        self.frame_counter % MAX_FRAMES_IN_FLIGHT
+    }
+
     // hacky, need to rearchitect this better according to how winit 0.30.10 handles the loop
     // maybe make two structs and have a method that turns it into the 2nd struct
     pub unsafe fn init(&mut self) -> Result<()> {
@@ -412,7 +429,7 @@ impl App {
             )?;
             create_command_buffers(&self.context.as_ref().unwrap().device, &mut self.data)?;
             self.data
-                .in_flight_swapchain_image_fences
+                .swapchain_frame_fences
                 .resize(self.data.swapchain_images.len(), vk::Fence::null());
             Ok(())
         }
@@ -458,16 +475,13 @@ impl App {
 
     pub unsafe fn render(&mut self) -> Result<()> {
         unsafe {
-            if !self.data.in_flight_swapchain_image_fences[self.frame_in_flight_idx].is_null() {
-                self.context.as_ref().unwrap().device.wait_for_fences(
-                    &[self.data.in_flight_swapchain_image_fences[self.frame_in_flight_idx]],
-                    true,
-                    u64::MAX,
-                )?;
-            }
+            let current_cpu_sync_fence =
+                self.data.cpu_sync_fences[self.current_in_flight_frame_idx()];
 
+            // In order to CPU-GPU synchronize we enforce an at most MAX_FRAMES_IN_FLIGHT frames by
+            // waiting on a fence, where in_flight_fences is of MAX_FRAMES_IN_FLIGHT length
             self.context.as_ref().unwrap().device.wait_for_fences(
-                &[self.data.in_flight_fences[self.frame_in_flight_idx]],
+                &[current_cpu_sync_fence],
                 true,
                 u64::MAX,
             )?;
@@ -480,7 +494,7 @@ impl App {
                 .acquire_next_image_khr(
                     self.data.swapchain,
                     u64::MAX,
-                    self.data.image_available_semaphores[self.frame_in_flight_idx],
+                    self.data.image_available_semaphores[self.current_in_flight_frame_idx()],
                     vk::Fence::null(),
                 );
 
@@ -490,38 +504,56 @@ impl App {
                 Err(e) => return Err(anyhow!(e)),
             };
 
-            self.data.in_flight_swapchain_image_fences[image_index] =
-                self.data.in_flight_fences[self.frame_in_flight_idx];
+            let current_swapchain_fence = self.data.swapchain_frame_fences[image_index];
 
-            let wait_semaphores = &[self.data.image_available_semaphores[self.frame_in_flight_idx]];
+            // In order to avoid acquiring a swapchain image that didn't finish execution, we
+            // wait on the CPU sync fence that was last associated with the swapchain image we want
+            // to grab.
+            // This might sometimes be the same fence as we waited on just before.
+            if !current_swapchain_fence.is_null() {
+                self.context.as_ref().unwrap().device.wait_for_fences(
+                    &[current_swapchain_fence],
+                    true,
+                    u64::MAX,
+                )?;
+            }
+
+            self.data.swapchain_frame_fences[image_index] = current_cpu_sync_fence;
+
+            let image_wait_semaphores =
+                &[self.data.image_available_semaphores[self.current_in_flight_frame_idx()]];
             let wait_stages = &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
             let command_buffers = &[self.data.command_buffers[image_index]];
-            let signal_semaphores =
-                &[self.data.render_finished_semaphores[self.frame_in_flight_idx]];
+            let render_finished_semaphores =
+                &[self.data.render_finished_semaphores[self.current_in_flight_frame_idx()]];
             let submit_info = vk::SubmitInfo::builder()
-                .wait_semaphores(wait_semaphores)
+                .wait_semaphores(image_wait_semaphores)
                 .wait_dst_stage_mask(wait_stages)
                 .command_buffers(command_buffers)
-                .signal_semaphores(signal_semaphores);
+                .signal_semaphores(render_finished_semaphores);
 
             self.context
                 .as_ref()
                 .unwrap()
                 .device
-                .reset_fences(&[self.data.in_flight_fences[self.frame_in_flight_idx]])?;
+                .reset_fences(&[current_cpu_sync_fence])?;
 
             self.context.as_ref().unwrap().device.queue_submit(
                 self.data.graphics_queue,
                 &[submit_info],
-                self.data.in_flight_fences[self.frame_in_flight_idx],
+                vk::Fence::null(),
             )?;
 
             let swapchains = &[self.data.swapchain];
             let image_indices = &[image_index as u32];
+            let present_fences = [current_cpu_sync_fence];
+            let mut present_fence_info =
+                vk::SwapchainPresentFenceInfoEXT::builder().fences(&present_fences);
             let present_info = vk::PresentInfoKHR::builder()
-                .wait_semaphores(signal_semaphores)
+                .wait_semaphores(render_finished_semaphores)
                 .swapchains(swapchains)
-                .image_indices(image_indices);
+                .image_indices(image_indices)
+                .push_next(&mut present_fence_info);
 
             let queue_present_result = self
                 .context
@@ -540,7 +572,7 @@ impl App {
             }
             let _queue_present_result = queue_present_result?;
 
-            self.frame_in_flight_idx = (self.frame_in_flight_idx + 1) % MAX_FRAMES_IN_FLIGHT;
+            self.frame_counter += 1;
 
             Ok(())
         }
@@ -695,12 +727,12 @@ unsafe fn create_sync_objects(device: &Device, data: &mut AppData) -> Result<()>
                 .push(device.create_semaphore(&semaphore_info, None)?);
             data.render_finished_semaphores
                 .push(device.create_semaphore(&semaphore_info, None)?);
-            data.in_flight_fences
+            data.cpu_sync_fences
                 .push(device.create_fence(&fence_info, None)?);
         }
     }
 
-    data.in_flight_swapchain_image_fences = data
+    data.swapchain_frame_fences = data
         .swapchain_images
         .iter()
         .map(|_| vk::Fence::null())
@@ -719,7 +751,7 @@ impl Drop for App {
                 .device_wait_idle()
                 .unwrap();
 
-            self.data.in_flight_fences.iter().for_each(|f| {
+            self.data.cpu_sync_fences.iter().for_each(|f| {
                 self.context
                     .as_ref()
                     .unwrap()
@@ -800,6 +832,6 @@ pub struct AppData {
     pub image_available_semaphores: Vec<vk::Semaphore>,
     pub render_finished_semaphores: Vec<vk::Semaphore>,
 
-    pub in_flight_fences: Vec<vk::Fence>,
-    pub in_flight_swapchain_image_fences: Vec<vk::Fence>,
+    pub cpu_sync_fences: Vec<vk::Fence>,
+    pub swapchain_frame_fences: Vec<vk::Fence>,
 }
