@@ -6,11 +6,11 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 log = "0.4"
-cgmath = "0.18"
-png = "0.17"
+#cgmath = "0.18"
+#png = "0.17"
 pretty_env_logger = "0.5"
-thiserror = "1"
-tobj = { version = "3", features = ["log"] }
+thiserror = "2.0.12"
+#tobj = { version = "4.0.3", features = ["log"] }
 vulkanalia = { version = "=0.28.0", features = ["libloading", "provisional", "window"] }
 vulkanalia-sys = "=0.28.0"
-winit = "0.29"
+winit = "0.30.10"

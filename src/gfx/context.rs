@@ -20,7 +20,11 @@ use vulkanalia::vk::{
 };
 use vulkanalia::{Device, Entry, Instance, vk, window as vk_window};
 use vulkanalia_sys::{Handle, InstanceCreateFlags};
-use winit::window::Window;
+use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::event::WindowEvent;
+use winit::event_loop::ActiveEventLoop;
+use winit::window::{Window, WindowId};
 
 pub struct AppExtensionConfig {
     extensions: Vec<*const c_char>,
@@ -147,9 +151,7 @@ unsafe fn check_physical_device(
     }
 }
 
-const REQUIRED_DEVICE_EXTENSIONS: &[vk::ExtensionName] = &[
-    vk::KHR_SWAPCHAIN_EXTENSION.name,
-];
+const REQUIRED_DEVICE_EXTENSIONS: &[vk::ExtensionName] = &[vk::KHR_SWAPCHAIN_EXTENSION.name];
 
 unsafe fn check_physical_device_extensions(
     instance: &Instance,
@@ -255,64 +257,135 @@ unsafe fn create_logical_device(
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Default, Debug)]
 pub struct App {
-    #[allow(dead_code)]
-    entry: Entry,
-    instance: Instance,
+    window: Option<Window>,
+    context: Option<AppContext>,
     data: AppData,
-    device: Device,
     frame_in_flight_idx: usize,
     pub resized: bool,
     pub minimized: bool,
+    old_size: PhysicalSize<u32>,
 }
 
-impl App {
-    pub unsafe fn create(window: &Window) -> Result<Self> {
+#[derive(Debug)]
+pub struct AppContext {
+    #[allow(dead_code)]
+    entry: Entry,
+    instance: Instance,
+    device: Device,
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        self.window = Some(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("gfx :3")
+                        .with_inner_size(LogicalSize::new(1280, 720)),
+                )
+                .unwrap(),
+        );
+        self.old_size = self.window.as_ref().unwrap().inner_size();
+
+        // FIXME: opposite of resumed to teardown state??
+        // FIXME: propagate error instead of unwrap
         unsafe {
-            let loader = LibloadingLoader::new(vulkanalia::loader::LIBRARY)?;
-            let entry = Entry::new(loader).map_err(|b| anyhow!("{}", b))?;
-            let mut data = AppData::default();
-            let instance = create_instance(window, &entry, &mut data)?;
-
-            // the surface must be created prior to picking the physical device
-            data.surface = vk_window::create_surface(&instance, &window, &window)?;
-
-            pick_physical_device(&instance, &mut data)?;
-            let device = create_logical_device(&entry, &instance, &mut data)?;
-
-            create_swapchain(window, &instance, &device, &mut data)?;
-            info!(
-                "Initial swapchain acquired ({} images, {:?}, {:?})",
-                data.swapchain_images.len(),
-                data.swapchain_format,
-                data.swapchain_extent
-            );
-
-            create_swapchain_image_views(&device, &mut data)?;
-
-            data.render_pipeline =
-                AppPipeline::new(&device, &data.swapchain_extent, data.swapchain_format)?;
-
-            create_command_pool(&instance, &device, &mut data)?;
-            create_command_buffers(&device, &mut data)?;
-            create_sync_objects(&device, &mut data)?;
-
-            Ok(Self {
-                entry,
-                instance,
-                data,
-                device,
-                frame_in_flight_idx: 0,
-                resized: false,
-                minimized: false,
-            })
+            self.init().unwrap();
         }
     }
 
-    unsafe fn recreate_swapchain(&mut self, window: &Window) -> Result<()> {
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        *self = App::default();
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !event_loop.exiting() && !self.minimized {
+            unsafe { self.render() }.unwrap()
+        }
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        match event {
+            WindowEvent::RedrawRequested => {
+                if !event_loop.exiting() && !self.minimized {
+                    unsafe { self.render() }.unwrap()
+                }
+            }
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(new_size) => {
+                if new_size.width == 0 || new_size.height == 0 {
+                    self.minimized = true;
+                } else if new_size != self.old_size {
+                    self.resized = true;
+                    self.minimized = false;
+                }
+                self.old_size = new_size;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl App {
+    // hacky, need to rearchitect this better according to how winit 0.30.10 handles the loop
+    // maybe make two structs and have a method that turns it into the 2nd struct
+    pub unsafe fn init(&mut self) -> Result<()> {
         unsafe {
-            self.device.device_wait_idle()?;
+            let loader = LibloadingLoader::new(vulkanalia::loader::LIBRARY)?;
+            let entry = Entry::new(loader).map_err(|b| anyhow!("{}", b))?;
+            self.data = AppData::default();
+            let instance = create_instance(self.window.as_ref().unwrap(), &entry, &mut self.data)?;
+
+            // the surface must be created prior to picking the physical device
+            self.data.surface = vk_window::create_surface(
+                &instance,
+                self.window.as_ref().unwrap(),
+                self.window.as_ref().unwrap(),
+            )?;
+
+            pick_physical_device(&instance, &mut self.data)?;
+            let device = create_logical_device(&entry, &instance, &mut self.data)?;
+
+            create_swapchain(
+                self.window.as_ref().unwrap(),
+                &instance,
+                &device,
+                &mut self.data,
+            )?;
+            info!(
+                "Initial swapchain acquired ({} images, {:?}, {:?})",
+                self.data.swapchain_images.len(),
+                self.data.swapchain_format,
+                self.data.swapchain_extent
+            );
+
+            create_swapchain_image_views(&device, &mut self.data)?;
+
+            self.data.render_pipeline = AppPipeline::new(
+                &device,
+                &self.data.swapchain_extent,
+                self.data.swapchain_format,
+            )?;
+
+            create_command_pool(&instance, &device, &mut self.data)?;
+            create_command_buffers(&device, &mut self.data)?;
+            create_sync_objects(&device, &mut self.data)?;
+
+            self.context = Some(AppContext {
+                entry,
+                instance,
+                device,
+            });
+
+            Ok(())
+        }
+    }
+
+    unsafe fn recreate_swapchain(&mut self) -> Result<()> {
+        unsafe {
+            self.context.as_ref().unwrap().device.device_wait_idle()?;
             self.destroy_swapchain_and_pipeline();
 
             // TODO: move swapchain fields and stuff to a unique struct
@@ -320,20 +393,25 @@ impl App {
             // part of the issue is that recreating the chain isn't strictly the same task as destroying
             // and recreating it, e.g. because we can opt to just clear the command buffers
 
-            create_swapchain(window, &self.instance, &self.device, &mut self.data)?;
+            create_swapchain(
+                self.window.as_ref().unwrap(),
+                &self.context.as_ref().unwrap().instance,
+                &self.context.as_ref().unwrap().device,
+                &mut self.data,
+            )?;
             debug!(
                 "Swapchain reacquired ({} images, {:?}, {:?})",
                 self.data.swapchain_images.len(),
                 self.data.swapchain_format,
                 self.data.swapchain_extent
             );
-            create_swapchain_image_views(&self.device, &mut self.data)?;
+            create_swapchain_image_views(&self.context.as_ref().unwrap().device, &mut self.data)?;
             self.data.render_pipeline = AppPipeline::new(
-                &self.device,
+                &self.context.as_ref().unwrap().device,
                 &self.data.swapchain_extent,
                 self.data.swapchain_format,
             )?;
-            create_command_buffers(&self.device, &mut self.data)?;
+            create_command_buffers(&self.context.as_ref().unwrap().device, &mut self.data)?;
             self.data
                 .in_flight_swapchain_image_fences
                 .resize(self.data.swapchain_images.len(), vk::Fence::null());
@@ -353,46 +431,63 @@ impl App {
     /// (e.g. command buffers that bind swapchain resources).
     unsafe fn destroy_swapchain_and_pipeline(&mut self) {
         unsafe {
-            self.device
+            self.context
+                .as_ref()
+                .unwrap()
+                .device
                 .free_command_buffers(self.data.command_pool, &self.data.command_buffers);
 
-            self.data.render_pipeline.destroy(&self.device);
-
             self.data
-                .swapchain_image_views
-                .iter()
-                .for_each(|v| self.device.destroy_image_view(*v, None));
+                .render_pipeline
+                .destroy(&self.context.as_ref().unwrap().device);
 
-            self.device.destroy_swapchain_khr(self.data.swapchain, None);
+            self.data.swapchain_image_views.iter().for_each(|v| {
+                self.context
+                    .as_ref()
+                    .unwrap()
+                    .device
+                    .destroy_image_view(*v, None)
+            });
+
+            self.context
+                .as_ref()
+                .unwrap()
+                .device
+                .destroy_swapchain_khr(self.data.swapchain, None);
         }
     }
 
-    pub unsafe fn render(&mut self, window: &Window) -> Result<()> {
+    pub unsafe fn render(&mut self) -> Result<()> {
         unsafe {
             if !self.data.in_flight_swapchain_image_fences[self.frame_in_flight_idx].is_null() {
-                self.device.wait_for_fences(
+                self.context.as_ref().unwrap().device.wait_for_fences(
                     &[self.data.in_flight_swapchain_image_fences[self.frame_in_flight_idx]],
                     true,
                     u64::MAX,
                 )?;
             }
 
-            self.device.wait_for_fences(
+            self.context.as_ref().unwrap().device.wait_for_fences(
                 &[self.data.in_flight_fences[self.frame_in_flight_idx]],
                 true,
                 u64::MAX,
             )?;
 
-            let image_acquisition_result = self.device.acquire_next_image_khr(
-                self.data.swapchain,
-                u64::MAX,
-                self.data.image_available_semaphores[self.frame_in_flight_idx],
-                vk::Fence::null(),
-            );
+            let image_acquisition_result = self
+                .context
+                .as_ref()
+                .unwrap()
+                .device
+                .acquire_next_image_khr(
+                    self.data.swapchain,
+                    u64::MAX,
+                    self.data.image_available_semaphores[self.frame_in_flight_idx],
+                    vk::Fence::null(),
+                );
 
             let image_index = match image_acquisition_result {
                 Ok((image_index, _)) => image_index as usize,
-                Err(vk::ErrorCode::OUT_OF_DATE_KHR) => return self.recreate_swapchain(window),
+                Err(vk::ErrorCode::OUT_OF_DATE_KHR) => return self.recreate_swapchain(),
                 Err(e) => return Err(anyhow!(e)),
             };
 
@@ -410,10 +505,13 @@ impl App {
                 .command_buffers(command_buffers)
                 .signal_semaphores(signal_semaphores);
 
-            self.device
+            self.context
+                .as_ref()
+                .unwrap()
+                .device
                 .reset_fences(&[self.data.in_flight_fences[self.frame_in_flight_idx]])?;
 
-            self.device.queue_submit(
+            self.context.as_ref().unwrap().device.queue_submit(
                 self.data.graphics_queue,
                 &[submit_info],
                 self.data.in_flight_fences[self.frame_in_flight_idx],
@@ -427,6 +525,9 @@ impl App {
                 .image_indices(image_indices);
 
             let queue_present_result = self
+                .context
+                .as_ref()
+                .unwrap()
                 .device
                 .queue_present_khr(self.data.present_queue, &present_info);
 
@@ -436,7 +537,7 @@ impl App {
             );
             if changed || self.resized {
                 self.resized = false;
-                self.recreate_swapchain(window)?;
+                self.recreate_swapchain()?;
             }
             let _queue_present_result = queue_present_result?;
 
@@ -612,36 +713,64 @@ unsafe fn create_sync_objects(device: &Device, data: &mut AppData) -> Result<()>
 impl Drop for App {
     fn drop(&mut self) {
         unsafe {
-            self.device.device_wait_idle().unwrap();
+            self.context
+                .as_ref()
+                .unwrap()
+                .device
+                .device_wait_idle()
+                .unwrap();
 
-            self.data
-                .in_flight_fences
-                .iter()
-                .for_each(|f| self.device.destroy_fence(*f, None));
+            self.data.in_flight_fences.iter().for_each(|f| {
+                self.context
+                    .as_ref()
+                    .unwrap()
+                    .device
+                    .destroy_fence(*f, None)
+            });
 
-            self.data
-                .render_finished_semaphores
-                .iter()
-                .for_each(|s| self.device.destroy_semaphore(*s, None));
-            self.data
-                .image_available_semaphores
-                .iter()
-                .for_each(|s| self.device.destroy_semaphore(*s, None));
+            self.data.render_finished_semaphores.iter().for_each(|s| {
+                self.context
+                    .as_ref()
+                    .unwrap()
+                    .device
+                    .destroy_semaphore(*s, None)
+            });
+            self.data.image_available_semaphores.iter().for_each(|s| {
+                self.context
+                    .as_ref()
+                    .unwrap()
+                    .device
+                    .destroy_semaphore(*s, None)
+            });
 
             self.destroy_swapchain_and_pipeline();
 
-            self.device
+            self.context
+                .as_ref()
+                .unwrap()
+                .device
                 .destroy_command_pool(self.data.command_pool, None);
 
-            self.device.destroy_device(None);
+            self.context.as_ref().unwrap().device.destroy_device(None);
 
             if VALIDATION_ENABLED {
-                self.instance
+                self.context
+                    .as_ref()
+                    .unwrap()
+                    .instance
                     .destroy_debug_utils_messenger_ext(self.data.messenger, None);
             }
 
-            self.instance.destroy_surface_khr(self.data.surface, None);
-            self.instance.destroy_instance(None);
+            self.context
+                .as_ref()
+                .unwrap()
+                .instance
+                .destroy_surface_khr(self.data.surface, None);
+            self.context
+                .as_ref()
+                .unwrap()
+                .instance
+                .destroy_instance(None);
 
             info!("Vulkan instance destroyed successfully.");
         }
