@@ -295,16 +295,6 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
-        *self = App::default();
-    }
-
-    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if !event_loop.exiting() && !self.minimized {
-            unsafe { self.render() }.unwrap()
-        }
-    }
-
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::RedrawRequested => {
@@ -324,6 +314,16 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if !event_loop.exiting() && !self.minimized {
+            unsafe { self.render() }.unwrap()
+        }
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        *self = App::default();
     }
 }
 
