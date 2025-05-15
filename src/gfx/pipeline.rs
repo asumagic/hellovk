@@ -15,7 +15,7 @@ pub struct AppShader {
 impl AppShader {
     pub fn new(device: &Device, bytecode: &[u8]) -> Result<Self> {
         let bytecode_aligned = Bytecode::new(bytecode)?;
-        // FIXME: why is the code_size parameter required here?
+        // TODO: why is the code_size parameter required here?
         // we get a validation error otherwise because the code size field is not populated, but the
         // tutorial implies .code() alone is sufficient
         let info = vk::ShaderModuleCreateInfo::builder()

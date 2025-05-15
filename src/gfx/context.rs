@@ -302,7 +302,7 @@ impl ApplicationHandler for App {
         );
         self.old_size = self.window.as_ref().unwrap().inner_size();
 
-        // FIXME: propagate error instead of unwrap
+        // TODO: propagate error instead of unwrap
         unsafe {
             self.init().unwrap();
         }
